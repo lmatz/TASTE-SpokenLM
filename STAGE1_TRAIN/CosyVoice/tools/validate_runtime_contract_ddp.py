@@ -4,6 +4,9 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
+import sys
+import tempfile
 
 import torch
 import torch.distributed as dist
@@ -39,6 +42,11 @@ def main():
     output_dir = pathlib.Path(args.output_dir).resolve()
     config_path = output_dir / 'config.yaml'
     expected_path = output_dir / 'expected.json'
+    rank_python_path = pathlib.Path(tempfile.mkdtemp(
+        prefix='runtime-contract-rank-{}-'.format(rank)))
+    (rank_python_path / '_remote_module_non_scriptable.py').write_text(
+        'VALUE = 1\n')
+    sys.path.append(str(rank_python_path))
     if rank == 0:
         output_dir.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
@@ -129,6 +137,8 @@ def main():
         if not aggregate['pass'] or aggregate['ranks'] != [0, 1]:
             raise RuntimeError('two-rank runtime contract did not pass')
         print('two-rank runtime contract validation: PASS')
+    sys.path.remove(str(rank_python_path))
+    shutil.rmtree(rank_python_path)
     dist.destroy_process_group()
 
 

@@ -8,6 +8,7 @@ import tempfile
 import torch
 
 from cosyvoice.utils.runtime_contract import (
+    canonical_python_path_entry,
     compare_expected,
     enforce_runtime_contract,
     runtime_payload,
@@ -38,6 +39,26 @@ def make_args(config_path, output_dir, expected_path):
 
 
 def main():
+    with tempfile.TemporaryDirectory() as first_directory, \
+            tempfile.TemporaryDirectory() as second_directory:
+        first_module = (
+            pathlib.Path(first_directory) /
+            '_remote_module_non_scriptable.py')
+        second_module = (
+            pathlib.Path(second_directory) /
+            '_remote_module_non_scriptable.py')
+        first_module.write_text('VALUE = 1\n')
+        second_module.write_text('VALUE = 1\n')
+        first_entry = canonical_python_path_entry(first_directory)
+        second_entry = canonical_python_path_entry(second_directory)
+        if first_entry != second_entry:
+            raise RuntimeError(
+                'identical generated modules must have one canonical path')
+        second_module.write_text('VALUE = 2\n')
+        if first_entry == canonical_python_path_entry(second_directory):
+            raise RuntimeError(
+                'different generated modules must not share a canonical path')
+
     with tempfile.TemporaryDirectory() as temporary_directory:
         root = pathlib.Path(temporary_directory)
         config_path = root / 'config.yaml'

@@ -51,6 +51,29 @@ def sha256_file(path):
     return digest.hexdigest()
 
 
+def temporary_python_path_sha256(path):
+    digest = hashlib.sha256()
+    for source_path in sorted(
+            candidate for candidate in path.rglob('*')
+            if candidate.is_file() and '__pycache__' not in candidate.parts):
+        relative_path = str(source_path.relative_to(path))
+        digest.update(relative_path.encode())
+        digest.update(b'\0')
+        digest.update(source_path.read_bytes())
+        digest.update(b'\0')
+    return digest.hexdigest()
+
+
+def canonical_python_path_entry(path):
+    resolved_path = pathlib.Path(path).resolve()
+    generated_module = resolved_path / '_remote_module_non_scriptable.py'
+    if (resolved_path.parent == pathlib.Path(tempfile.gettempdir()).resolve()
+            and generated_module.is_file()):
+        return 'torch-distributed-jit-sha256:{}'.format(
+            temporary_python_path_sha256(resolved_path))
+    return str(resolved_path)
+
+
 def name_list_sha256(names):
     return sha256_bytes(
         ('\n'.join(names) + '\n').encode())
@@ -165,7 +188,7 @@ def runtime_payload(args, configs, model, optimizer, scheduler, rank, world_size
                 str(dist.get_backend()) if dist.is_initialized() else None),
             'world_size': world_size,
             'python_path': [
-                str(pathlib.Path(path).resolve()) for path in sys.path
+                canonical_python_path_entry(path) for path in sys.path
             ],
             'pythonpath_environment': os.environ.get('PYTHONPATH'),
             'matcha_module_file': module_origin('matcha'),
