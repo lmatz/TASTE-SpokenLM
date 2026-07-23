@@ -28,6 +28,9 @@ def validate_uneven_join_does_not_count_dropped_batch():
         def train():
             pass
 
+    class DummyOptimizer:
+        param_groups = [{'lr': 0.0}]
+
     info_dict = {
         'accum_grad': 2,
         'train_engine': 'torch_ddp',
@@ -42,7 +45,7 @@ def validate_uneven_join_does_not_count_dropped_batch():
         with mock.patch('cosyvoice.utils.executor.dist.barrier'):
             executor.train_one_epoc(
                 DummyModel(),
-                optimizer=None,
+                optimizer=DummyOptimizer(),
                 scheduler=None,
                 train_data_loader=[dropped_batch],
                 cv_data_loader=[],
