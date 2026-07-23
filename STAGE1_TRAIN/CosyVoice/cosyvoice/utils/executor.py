@@ -182,8 +182,6 @@ class Executor:
             train_iterator, position=self.rank, desc=f"[Rank {self.rank}] Training...")
         for batch_idx, batch_dict in enumerate(progress, start=start_batch_idx):
             batch_ready = time.perf_counter()
-            self.accumulated_dataloader_wait_seconds += batch_ready - previous_batch_end
-            self.accumulated_audio_seconds += self.batch_audio_seconds(batch_dict)
             info_dict["tag"] = "TRAIN"
             info_dict["step"] = self.step
             info_dict["epoch"] = self.epoch
@@ -193,6 +191,10 @@ class Executor:
             
             if cosyvoice_join(group_join, info_dict):
                 break
+            self.accumulated_dataloader_wait_seconds += (
+                batch_ready - previous_batch_end)
+            self.accumulated_audio_seconds += self.batch_audio_seconds(
+                batch_dict)
             self.record_sample_trace(batch_dict, info_dict)
 
             # Disable gradient synchronizations across DDP processes.
