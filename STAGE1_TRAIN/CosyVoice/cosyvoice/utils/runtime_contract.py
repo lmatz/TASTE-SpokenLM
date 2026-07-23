@@ -1,8 +1,10 @@
 import hashlib
+import importlib.util
 import json
 import logging
 import os
 import pathlib
+import sys
 import tempfile
 
 import torch
@@ -52,6 +54,13 @@ def sha256_file(path):
 def name_list_sha256(names):
     return sha256_bytes(
         ('\n'.join(names) + '\n').encode())
+
+
+def module_origin(module_name):
+    specification = importlib.util.find_spec(module_name)
+    if specification is None or specification.origin is None:
+        return None
+    return str(pathlib.Path(specification.origin).resolve())
 
 
 def optimizer_payload(optimizer):
@@ -155,6 +164,11 @@ def runtime_payload(args, configs, model, optimizer, scheduler, rank, world_size
             'distributed_backend': (
                 str(dist.get_backend()) if dist.is_initialized() else None),
             'world_size': world_size,
+            'python_path': [
+                str(pathlib.Path(path).resolve()) for path in sys.path
+            ],
+            'pythonpath_environment': os.environ.get('PYTHONPATH'),
+            'matcha_module_file': module_origin('matcha'),
         },
     }
     invariant_json = json.dumps(

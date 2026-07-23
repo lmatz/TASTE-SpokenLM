@@ -103,6 +103,12 @@ def main():
                 'runtime': {
                     'world_size': 2,
                     'distributed_backend': 'gloo',
+                    'python_path': payload[
+                        'invariant']['runtime']['python_path'],
+                    'pythonpath_environment': payload[
+                        'invariant']['runtime']['pythonpath_environment'],
+                    'matcha_module_file': payload[
+                        'invariant']['runtime']['matcha_module_file'],
                 },
             },
         }))
