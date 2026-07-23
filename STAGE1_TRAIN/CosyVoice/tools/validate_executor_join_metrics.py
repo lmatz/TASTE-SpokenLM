@@ -36,21 +36,20 @@ def validate_uneven_join_does_not_count_dropped_batch():
         'audio_feat_len': torch.tensor([100]),
         'utts': ['dropped'],
     }
-    with (
-            mock.patch(
-                'cosyvoice.utils.executor.cosyvoice_join',
-                return_value=True),
-            mock.patch('cosyvoice.utils.executor.dist.barrier')):
-        executor.train_one_epoc(
-            DummyModel(),
-            optimizer=None,
-            scheduler=None,
-            train_data_loader=[dropped_batch],
-            cv_data_loader=[],
-            writer=None,
-            info_dict=info_dict,
-            group_join=None,
-        )
+    with mock.patch(
+            'cosyvoice.utils.executor.cosyvoice_join',
+            return_value=True):
+        with mock.patch('cosyvoice.utils.executor.dist.barrier'):
+            executor.train_one_epoc(
+                DummyModel(),
+                optimizer=None,
+                scheduler=None,
+                train_data_loader=[dropped_batch],
+                cv_data_loader=[],
+                writer=None,
+                info_dict=info_dict,
+                group_join=None,
+            )
     assert_close(
         executor.accumulated_audio_seconds, 0.0,
         'dropped batch audio seconds')
