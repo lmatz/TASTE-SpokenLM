@@ -15,6 +15,7 @@
 # limitations under the License.
 """PyTorch Whisper model."""
 
+import copy
 import math
 from typing import Optional, Tuple, Union, Dict
 
@@ -1514,11 +1515,26 @@ class WhisperDecoder(WhisperPreTrainedModel):
     WHISPER_START_DOCSTRING,
 )
 class WhisperModel(WhisperPreTrainedModel):
-    def __init__(self, config: WhisperConfig):
+    def __init__(
+        self,
+        config: WhisperConfig,
+        encoder_attn_implementation: Optional[str] = None,
+        decoder_attn_implementation: Optional[str] = None,
+    ):
         super().__init__(config)
 
-        self.encoder = WhisperEncoder(config)
-        self.decoder = WhisperDecoder(config)
+        if encoder_attn_implementation is None:
+            encoder_config = config
+        else:
+            encoder_config = copy.deepcopy(config)
+            encoder_config._attn_implementation = encoder_attn_implementation
+        self.encoder = WhisperEncoder(encoder_config)
+        if decoder_attn_implementation is None:
+            decoder_config = config
+        else:
+            decoder_config = copy.deepcopy(config)
+            decoder_config._attn_implementation = decoder_attn_implementation
+        self.decoder = WhisperDecoder(decoder_config)
         # Initialize weights and apply final processing
         self.post_init()
 

@@ -17,11 +17,13 @@
 from contextlib import nullcontext
 import logging
 import os
+import random
 import torch
 import json
 import re
 import datetime
 import yaml
+import numpy as np
 
 import deepspeed
 import torch.optim as optim
@@ -34,6 +36,7 @@ from torch.nn.utils import clip_grad_norm_
 from deepspeed.runtime.zero.stage_1_and_2 import estimate_zero2_model_states_mem_needs_all_live
 
 from cosyvoice.dataset.dataset import Dataset
+from cosyvoice.utils.checkpoint import unwrap_model
 from cosyvoice.utils.scheduler import WarmupLR, NoamHoldAnnealing, ConstantLR
 
 
@@ -57,17 +60,37 @@ def init_dataset_and_dataloader(args, configs):
     cv_dataset = Dataset(args.cv_data, data_pipeline=configs['data_pipeline'], mode='train', shuffle=False, partition=True) # set to true for speeding up validation
 
     # do not use persistent_workers=True, as whisper tokenizer opens tiktoken file each time when the for loop starts
-    train_data_loader = DataLoader(train_dataset,
-                                   batch_size=None,
-                                   pin_memory=args.pin_memory,
-                                   num_workers=args.num_workers,
-                                   prefetch_factor=args.prefetch)
-    cv_data_loader = DataLoader(cv_dataset,
-                                batch_size=None,
-                                pin_memory=args.pin_memory,
-                                num_workers=args.num_workers,
-                                prefetch_factor=args.prefetch)
+    rank = int(os.environ.get('RANK', 0))
+    train_generator = torch.Generator()
+    train_generator.manual_seed(args.seed + rank)
+    cv_generator = torch.Generator()
+    cv_generator.manual_seed(args.seed + 10_000 + rank)
+    loader_kwargs = {
+        'batch_size': None,
+        'pin_memory': args.pin_memory,
+        'num_workers': args.num_workers,
+        'worker_init_fn': seed_worker,
+    }
+    if args.num_workers > 0:
+        loader_kwargs['prefetch_factor'] = args.prefetch
+    train_data_loader = DataLoader(
+        train_dataset, generator=train_generator, **loader_kwargs)
+    cv_data_loader = DataLoader(
+        cv_dataset, generator=cv_generator, **loader_kwargs)
     return train_dataset, cv_dataset, train_data_loader, cv_data_loader
+
+
+def seed_worker(worker_id):
+    del worker_id
+    worker_seed = torch.initial_seed() % (2 ** 32)
+    random.seed(worker_seed)
+    np.random.seed(worker_seed)
+
+
+def set_dataloader_seed(data_loader, seed):
+    if data_loader.generator is None:
+        raise RuntimeError('dataloader has no dedicated generator')
+    data_loader.generator.manual_seed(seed)
 
 
 
@@ -160,7 +183,7 @@ def save_model(model, model_name, info_dict):
 
     if info_dict["train_engine"] == "torch_ddp":
         if rank == 0:
-            torch.save(model.module.state_dict(), save_model_path)
+            torch.save(unwrap_model(model).state_dict(), save_model_path)
     else:
         with torch.no_grad():
             model.save_checkpoint(save_dir=model_dir,
@@ -215,6 +238,14 @@ def batch_forward(model, batch, info_dict):
 
     with autocast:
         info_dict['loss_dict'] = model(batch, device)
+    for name, value in info_dict['loss_dict'].items():
+        if torch.is_tensor(value) and value.is_floating_point() and not torch.isfinite(value).all():
+            raise FloatingPointError(
+                'non-finite {} value at epoch {} batch {} step {}'.format(
+                    name,
+                    info_dict.get('epoch', 0),
+                    info_dict.get('batch_idx', 0),
+                    info_dict.get('step', 0)))
     return info_dict
 
 
@@ -231,19 +262,41 @@ def batch_backward(model, info_dict):
 
 def update_parameter_and_lr(model, optimizer, scheduler, info_dict):
     grad_norm = 0.0
+    optimizer_step = False
     if info_dict['train_engine'] == "deepspeed":
         info_dict["is_gradient_accumulation_boundary"] = model.is_gradient_accumulation_boundary()
         model.step()
         grad_norm = model.get_global_grad_norm()
-    elif (info_dict['batch_idx'] + 1) % info_dict["accum_grad"] == 0:
+        optimizer_step = info_dict["is_gradient_accumulation_boundary"]
+        if optimizer_step and not torch.isfinite(torch.as_tensor(grad_norm)).all():
+            raise FloatingPointError('non-finite deepspeed gradient norm')
+    elif info_dict["accumulation_boundary"]:
         grad_norm = clip_grad_norm_(model.parameters(), info_dict['grad_clip'])
-        if torch.isfinite(grad_norm):
-            optimizer.step()
+        if not torch.isfinite(grad_norm):
+            raise FloatingPointError(
+                'non-finite gradient norm at epoch {} batch {} step {}'.format(
+                    info_dict.get('epoch', 0),
+                    info_dict.get('batch_idx', 0),
+                    info_dict.get('step', 0)))
+        optimizer.step()
         optimizer.zero_grad()
         scheduler.step()
+        optimizer_step = True
     info_dict["lr"] = optimizer.param_groups[0]['lr']
     info_dict["grad_norm"] = grad_norm
+    info_dict["optimizer_step"] = optimizer_step
     return info_dict
+
+
+def check_model_finite(model):
+    target_model = unwrap_model(model)
+    nonfinite = []
+    for name, value in target_model.state_dict().items():
+        if value.is_floating_point() and not torch.isfinite(value).all():
+            nonfinite.append(name)
+    if nonfinite:
+        raise FloatingPointError(
+            'non-finite model state tensors: {}'.format(', '.join(nonfinite[:20])))
 
 
 def log_per_step(writer, info_dict):
@@ -257,7 +310,7 @@ def log_per_step(writer, info_dict):
     # only rank 0 write to tensorboard to avoid multi-process write
     if writer is not None:
         if (info_dict['train_engine'] == 'deepspeed' and info_dict['is_gradient_accumulation_boundary'] is True) or \
-           (info_dict['train_engine'] == 'torch_ddp' and (info_dict['batch_idx'] + 1) % info_dict['accum_grad'] == 0):
+           (info_dict['train_engine'] == 'torch_ddp' and info_dict['optimizer_step']):
             for k in ['epoch', 'lr', 'grad_norm']:
                 writer.add_scalar('{}/{}'.format(tag, k), info_dict[k], step + 1)
             for k, v in loss_dict.items():
