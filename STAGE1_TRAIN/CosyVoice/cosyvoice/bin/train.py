@@ -43,6 +43,7 @@ from cosyvoice.utils.train_utils import (
     init_optimizer_and_scheduler,
     init_summarywriter, save_model,
     wrap_cuda_model, check_modify_and_save_config, set_dataloader_seed)
+from cosyvoice.utils.runtime_contract import enforce_runtime_contract
 
 
 def get_args():
@@ -135,6 +136,12 @@ def get_args():
                         help='rank-zero structured training/validation/checkpoint metrics')
     parser.add_argument('--sample_trace_dir',
                         help='optional per-rank JSONL trace of batch utterance keys')
+    parser.add_argument(
+        '--expected_runtime_contract',
+        help='JSON assertions for the pre-training runtime contract gate')
+    parser.add_argument(
+        '--runtime_contract_dir',
+        help='directory for per-rank and aggregate runtime contracts')
     parser = deepspeed.add_config_arguments(parser)
     args = parser.parse_args()
     return args
@@ -155,6 +162,11 @@ def main():
     if (args.resume_best_checkpoint is None) != (args.resume_best_score is None):
         raise ValueError(
             '--resume_best_checkpoint and --resume_best_score must be supplied together')
+    if ((args.expected_runtime_contract is None) !=
+            (args.runtime_contract_dir is None)):
+        raise ValueError(
+            '--expected_runtime_contract and --runtime_contract_dir '
+            'must be supplied together')
     # logging.basicConfig(level=logging.DEBUG,
     #                     format='%(asctime)s %(levelname)s %(message)s')
     logging.basicConfig(level=logging.INFO,
@@ -259,6 +271,17 @@ def main():
     if rank == 0:
         shutil.copyfile(src_fpath, tgt_fpath)
     dist.barrier()
+
+    if args.expected_runtime_contract is not None:
+        enforce_runtime_contract(
+            args,
+            configs,
+            model,
+            optimizer,
+            scheduler,
+            args.expected_runtime_contract,
+            args.runtime_contract_dir,
+        )
 
     if info_dict['max_optimizer_steps'] > 0 and executor.step >= info_dict['max_optimizer_steps']:
         logging.info(

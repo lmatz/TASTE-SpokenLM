@@ -39,6 +39,11 @@ def canonical_state_sha256(state):
     return digest.hexdigest()
 
 
+def name_list_sha256(names):
+    return hashlib.sha256(
+        ('\n'.join(names) + '\n').encode()).hexdigest()
+
+
 def atomic_torch_save(payload, destination):
     destination.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(
@@ -87,6 +92,8 @@ def main():
     }
     inventory = parameter_inventory(model)
     named_parameters = dict(model.named_parameters())
+    trainable_names = inventory['trainable']
+    frozen_names = inventory['frozen']
     atomic_torch_save(state, checkpoint_path)
     report = {
         'format': 'cosyvoice_scratch_model_checkpoint_v1',
@@ -108,16 +115,18 @@ def main():
             'tensor_count': len(state),
         },
         'parameters': {
-            'trainable_tensor_count': len(inventory['trainable']),
-            'frozen_tensor_count': len(inventory['frozen']),
+            'trainable_tensor_count': len(trainable_names),
+            'frozen_tensor_count': len(frozen_names),
             'trainable_numel': sum(
                 named_parameters[name].numel()
-                for name in inventory['trainable']
+                for name in trainable_names
             ),
             'frozen_numel': sum(
                 named_parameters[name].numel()
-                for name in inventory['frozen']
+                for name in frozen_names
             ),
+            'trainable_names_sha256': name_list_sha256(trainable_names),
+            'frozen_names_sha256': name_list_sha256(frozen_names),
         },
     }
     report_path.parent.mkdir(parents=True, exist_ok=True)
