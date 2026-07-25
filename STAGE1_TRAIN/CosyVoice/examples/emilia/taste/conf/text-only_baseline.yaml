@@ -131,6 +131,7 @@ hift: !new:cosyvoice.hifigan.generator.HiFTGenerator
 
 # processor functions
 parquet_opener: !name:cosyvoice.dataset.processor.parquet_opener
+    decode_audio: False
 get_tokenizer: !name:whisper.tokenizer.get_tokenizer
     multilingual: True
     num_languages: 100
@@ -159,6 +160,15 @@ feat_extractor: !name:matcha.utils.audio.mel_spectrogram
     center: False
 compute_fbank: !name:cosyvoice.dataset.processor.compute_fbank
     feat_extractor: !ref <feat_extractor>
+prepare_text_only_batching: !name:cosyvoice.dataset.processor.prepare_text_only_batching
+    target_sample_rate: !ref <sample_rate>
+    n_fft: 1024
+    hop_size: 256
+    min_sample_rate: 16000
+    max_length: 40960
+    min_length: 0
+    token_max_length: 200
+    token_min_length: 1
 parse_embedding: !name:cosyvoice.dataset.processor.parse_embedding
     normalize: True
 shuffle: !name:cosyvoice.dataset.processor.shuffle
@@ -177,9 +187,7 @@ data_pipeline: [
     !ref <parquet_opener>,
     !ref <tokenize>,
     # !ref <tokenize_whisper>,
-    !ref <filter>,
-    !ref <resample>,
-    !ref <compute_fbank>,
+    !ref <prepare_text_only_batching>,
     !ref <parse_embedding>,
     !ref <shuffle>,
     !ref <sort>,
