@@ -5,6 +5,8 @@ import json
 import random
 from io import BytesIO
 
+import soundfile as sf
+import torch
 import torchaudio
 from datasets import Audio, Dataset
 from matcha.utils.audio import mel_spectrogram
@@ -64,7 +66,9 @@ def main():
             n_fft=args.n_fft,
             hop_size=args.hop_size)
 
-        waveform, source_sample_rate = torchaudio.load(BytesIO(audio_data))
+        waveform_array, source_sample_rate = sf.read(
+            BytesIO(audio_data), dtype='float32', always_2d=True)
+        waveform = torch.from_numpy(waveform_array.T.copy())
         if waveform.shape[-1] != predicted['source_frames']:
             raise AssertionError(
                 f'{path}:{row_index} decoded source frames '
