@@ -66,6 +66,7 @@ def get_nesty_module_by_key(orig_module: torch.nn.Module, target_key: str):
 def load_whisper_whole_model(
     model_name_or_path: str = "",
     attn_implementation: str = "eager", # select from ['eager', 'sdpa', 'flash_attention_2']
+    decoder_attn_implementation: Optional[str] = None,
     dtype: str = "float32", # select from ['float32', 'float16', 'bfloat16']
     use_custom: bool = False,
     **kwargs,
@@ -77,10 +78,20 @@ def load_whisper_whole_model(
     else: 
         torch_dtype = torch.float32
     if use_custom:
+        loader_attn_implementation = attn_implementation
+        encoder_attn_implementation = None
+        if (
+            decoder_attn_implementation is not None
+            and decoder_attn_implementation != attn_implementation
+        ):
+            loader_attn_implementation = decoder_attn_implementation
+            encoder_attn_implementation = attn_implementation
         whole_model = CustomWhisperModel.from_pretrained(
             model_name_or_path,
             torch_dtype = torch_dtype,
-            attn_implementation = attn_implementation,
+            attn_implementation = loader_attn_implementation,
+            encoder_attn_implementation = encoder_attn_implementation,
+            decoder_attn_implementation = decoder_attn_implementation,
             **kwargs,
         )
         print("Use customized whisper!")
@@ -106,4 +117,3 @@ def get_s3_encoder_dict(
             print(f"Skipping {name} as it doesn't exist in the whispher encode's state_dict")
 
     return whisper_encoder_dict
-

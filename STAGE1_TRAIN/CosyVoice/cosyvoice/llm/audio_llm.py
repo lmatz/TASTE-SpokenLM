@@ -7,6 +7,7 @@ import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence, unpad_sequence
 from cosyvoice.utils.class_utils import RTSLM_FUSION_CLASSES
 from cosyvoice.utils.common import IGNORE_ID, th_accuracy
+from cosyvoice.utils.diagnostic_metrics import summarize_audio_representations
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -207,14 +208,34 @@ class TransformerJointLM(TransformerLM):
         # 7. run lm forward
         lm_output, lm_output_mask = self.llm(lm_input, lm_input_len.to(device))
         logits = self.llm_decoder(lm_output)
-        loss = self.criterion_ce(logits, lm_target)
+        ce_loss = self.criterion_ce(logits, lm_target)
         # add quantized_commit loss
-        _quantized_loss = self.quantized_loss_weight * quantized_results.get('quantized_loss', 0.0)
-        loss += _quantized_loss
+        quantization_loss_raw = quantized_results.get(
+            'quantized_loss', ce_loss.new_zeros(()))
+        if not torch.is_tensor(quantization_loss_raw):
+            quantization_loss_raw = ce_loss.new_tensor(quantization_loss_raw)
+        quantization_loss_weighted = (
+            self.quantized_loss_weight * quantization_loss_raw)
+        loss = ce_loss + quantization_loss_weighted
         # end of add quantized_commit loss
         acc = th_accuracy(logits.view(-1, self.speech_token_size + 1), lm_target, ignore_label=IGNORE_ID)
         valid_length = torch.sum(lm_target != IGNORE_ID).detach()
-        results = {'loss': loss, 'acc': acc, 'len': valid_length}
+        fusion_logits = getattr(
+            self.fuse_encoded_audio_text_module, 'weights', None)
+        diagnostic_metrics = summarize_audio_representations(
+            audio_quantized_feats,
+            audio_quantized_feats_len,
+            text_token_len,
+            fusion_logits=fusion_logits)
+        results = {
+            'loss': loss,
+            'ce_loss': ce_loss.detach(),
+            'quantization_loss_raw': quantization_loss_raw.detach(),
+            'quantization_loss_weighted': quantization_loss_weighted.detach(),
+            'acc': acc,
+            'len': valid_length,
+            **diagnostic_metrics,
+        }
         if return_logits:
             results['logits'] = logits.detach()
         return results

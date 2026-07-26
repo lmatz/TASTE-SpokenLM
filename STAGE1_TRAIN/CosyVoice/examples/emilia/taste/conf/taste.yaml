@@ -64,7 +64,8 @@ llm: !new:cosyvoice.llm.audio_llm.TransformerJointLM
     audio_tokenizer: !new:cosyvoice.audio.audio_tokenizer.JointEncoderSegmenterAudioTokenizer
         audio_joint_encoder_segmenter: !new:cosyvoice.audio.audio_joint_encoder_segmenter.WhisperAudioJointEncoderSegmenter
             model_name_or_path: !ref <whisper_tokenizer_fpath>
-            attn_implementation: eager
+            attn_implementation: sdpa
+            decoder_attn_implementation: eager
             # attn_implementation: flash_attention_2 # requires additional installation
             dtype: float32
             use_custom: True

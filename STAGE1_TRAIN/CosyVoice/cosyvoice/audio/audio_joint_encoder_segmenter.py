@@ -61,6 +61,7 @@ class WhisperAudioJointEncoderSegmenter(BaseAudioJointEncoderSegmenter):
         model_name_or_path: str,
         target_hidden_layer: int = 6,
         attn_implementation: str = "eager",
+        decoder_attn_implementation: Optional[str] = None,
         dtype: str = 'float32',
         forward_type = "add_and_norm", # Currently support: ['original', add, add_and_norm, asr_attn_pooling]
         make_v_proj_identity: bool = False, 
@@ -69,13 +70,17 @@ class WhisperAudioJointEncoderSegmenter(BaseAudioJointEncoderSegmenter):
         **kwargs,
     ): 
         super().__init__()
+        if decoder_attn_implementation is None:
+            decoder_attn_implementation = attn_implementation
         whole_model, torch_dtype = load_whisper_whole_model(
             model_name_or_path,
             attn_implementation = attn_implementation,
+            decoder_attn_implementation = decoder_attn_implementation,
             dtype = dtype,
             use_custom = True,
         )
         self.attn_implementation = attn_implementation
+        self.decoder_attn_implementation = decoder_attn_implementation
         self.config = whole_model.config
         self.torch_dtype = torch_dtype
         encoder = whole_model.get_encoder()
@@ -159,7 +164,7 @@ class WhisperAudioJointEncoderSegmenter(BaseAudioJointEncoderSegmenter):
                 "states_for_val": target_encoder_hidden,
             }
         ## decoder forward
-        output_attentions = (self.attn_implementation == "eager")
+        output_attentions = (self.decoder_attn_implementation == "eager")
         decoder_outputs = self.audio_segmenter.decoder(
             input_ids = whisper_text_token,
             encoder_hidden_states = encoded_feats,
