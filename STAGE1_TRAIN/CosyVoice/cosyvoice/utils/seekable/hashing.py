@@ -81,19 +81,30 @@ def _canonical_dtype_name(dtype: torch.dtype) -> str:
     return _DTYPE_NAME[dtype]
 
 
-def _little_endian_c_bytes(t: torch.Tensor) -> bytes:
-    """CPU-contiguous, C-order, explicitly little-endian value bytes (item 6).
-
-    Forces LE regardless of host endianness via numpy byteorder, and forbids NaN
-    in float payloads (contract sect. 9).
-    """
-    a = t.detach().cpu().contiguous().numpy()
-    if a.dtype.kind == "f" and not np.all(np.isfinite(a)):
-        raise ValueError("NaN/Inf forbidden in float model-input payload")
+def _le_bytes_from_numpy(a: "np.ndarray") -> bytes:
     a = np.ascontiguousarray(a)
     if a.dtype.byteorder not in ("<", "|"):  # big or native-on-BE host
         a = a.astype(a.dtype.newbyteorder("<"))
     return a.tobytes(order="C")
+
+
+def _little_endian_c_bytes(t: torch.Tensor) -> bytes:
+    """CPU-contiguous, C-order, explicitly little-endian value bytes (item 6).
+
+    Forces LE regardless of host endianness and forbids NaN/Inf in float payloads
+    (contract sect. 9). bfloat16 has no numpy dtype, so its raw 16-bit storage is
+    viewed as uint16 and LE-canonicalized (the bf16 bit pattern is preserved).
+    """
+    t = t.detach().cpu().contiguous()
+    if t.dtype == torch.bfloat16:
+        if not bool(torch.isfinite(t).all()):
+            raise ValueError("NaN/Inf forbidden in bfloat16 model-input payload")
+        # reinterpret the 2-byte bf16 storage as uint16 (same element size)
+        return _le_bytes_from_numpy(t.view(torch.uint16).numpy())
+    a = t.numpy()
+    if a.dtype.kind == "f" and not np.all(np.isfinite(a)):
+        raise ValueError("NaN/Inf forbidden in float model-input payload")
+    return _le_bytes_from_numpy(a)
 
 
 def _encode_tensor_field(name: str, t: torch.Tensor) -> bytes:
@@ -124,41 +135,84 @@ def _encode_string_list_field(name: str, items) -> bytes:
     return bytes(out)
 
 
-def _as_tensor(v) -> torch.Tensor:
-    return v if isinstance(v, torch.Tensor) else torch.as_tensor(v)
+def _require_tensor(name: str, v) -> torch.Tensor:
+    """Fail-closed: the oracle hashes the ACTUAL collated tensor objects; a list
+    or ndarray silently coerced to a tensor would let runtime type drift hash
+    successfully instead of aborting before forward (contract sect. 9)."""
+    if not isinstance(v, torch.Tensor):
+        raise TypeError(
+            "model-input field {!r} must be a torch.Tensor, got {}".format(
+                name, type(v).__name__))
+    return v
+
+
+def _require_str_sequence(name: str, v):
+    """Fail-closed: ``utts`` must be a sequence of str, not a bare string (which
+    would iterate into characters) and not contain non-str elements."""
+    if isinstance(v, (str, bytes, bytearray)):
+        raise TypeError("{!r} must be a sequence of str, not a bare string".format(name))
+    items = list(v)
+    for x in items:
+        if not isinstance(x, str):
+            raise TypeError("{!r} must contain only str, got {}".format(name, type(x).__name__))
+    return items
 
 
 def model_input_hash(batch: dict) -> str:
     """Authoritative model-input SHA-256 (contract sect. 9). ``batch`` is the
-    collated dict the model consumes plus the ``utts``/``speech_feat_len`` guards."""
+    collated dict the model consumes plus the ``utts``/``speech_feat_len`` guards.
+    All five model fields and ``speech_feat_len`` must be real ``torch.Tensor``;
+    ``utts`` must be a strict sequence of str."""
     import hashlib
     h = hashlib.sha256()
     h.update(MODEL_INPUT_MAGIC)
     for field in MODEL_INPUT_FIELDS:
-        h.update(_encode_tensor_field(field, _as_tensor(batch[field])))
-    h.update(_encode_string_list_field("utts", list(batch["utts"])))
+        h.update(_encode_tensor_field(field, _require_tensor(field, batch[field])))
+    h.update(_encode_string_list_field("utts", _require_str_sequence("utts", batch["utts"])))
     for field in GUARD_TENSOR_FIELDS:
-        h.update(_encode_tensor_field(field, _as_tensor(batch[field])))
+        h.update(_encode_tensor_field(field, _require_tensor(field, batch[field])))
     return h.hexdigest()
 
 
+_HEX64_CHARS = frozenset("0123456789abcdef")
+
+
+def _require_sha256_hex(v) -> bytes:
+    """Fail-closed: exactly lowercase [0-9a-f]{64}; reject short/whitespace/upper."""
+    if not isinstance(v, str) or len(v) != 64 or any(c not in _HEX64_CHARS for c in v):
+        raise ValueError("shard sha256 must be exactly lowercase 64-hex: {!r}".format(v))
+    return bytes.fromhex(v)
+
+
+def _require_row_index(v) -> int:
+    """Fail-closed: a real non-bool integer in [0, 2**64) (reject float/str/bool)."""
+    if isinstance(v, bool) or not isinstance(v, int) or not (0 <= v < 2 ** 64):
+        raise ValueError("row_index must be a non-bool int in [0, 2**64): {!r}".format(v))
+    return v
+
+
 def identity_precheck_hash(utts, row_ids) -> str:
-    """Cheap identity/order precheck (contract sect. 9).
+    """Cheap identity/order precheck (contract sect. 9), fail-closed.
 
     ``row_ids`` is an ordered iterable of (source_shard_sha256_hex, row_index).
     Choice (D): row id encoded as 32 raw sha256 bytes + uint64 BE row index.
+    Requires len(utts) == len(row_ids), each utt a str, each shard sha exactly
+    lowercase 64-hex, each row_index a non-bool int in [0, 2**64).
     """
     import hashlib
+    utts = _require_str_sequence("utts", utts)
+    row_ids = list(row_ids)
+    if len(utts) != len(row_ids):
+        raise ValueError(
+            "identity precheck: len(utts)={} != len(row_ids)={}".format(len(utts), len(row_ids)))
     h = hashlib.sha256()
     h.update(IDENTITY_PRECHECK_MAGIC)
-    utts = list(utts)
     h.update(struct.pack(">Q", len(utts)))
     for u in utts:
         b = u.encode("utf-8")
         h.update(struct.pack(">Q", len(b)) + b)
-    row_ids = list(row_ids)
     h.update(struct.pack(">Q", len(row_ids)))
     for shard_sha256_hex, row_index in row_ids:
-        h.update(bytes.fromhex(shard_sha256_hex))
-        h.update(struct.pack(">Q", int(row_index)))
+        h.update(_require_sha256_hex(shard_sha256_hex))
+        h.update(struct.pack(">Q", _require_row_index(row_index)))
     return h.hexdigest()

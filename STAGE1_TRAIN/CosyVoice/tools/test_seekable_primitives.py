@@ -164,6 +164,67 @@ def test_dtype_mapping():
         check("dtype.unlisted_abort", True)
 
 
+GOLDEN_BF16_MODEL_INPUT_HASH = "cdc3625b2b81d15ca16500f2d2e8ecc00e8b09ef2d5fa9027a4b236e9530f404"
+
+
+def bf16_batch():
+    b = golden_batch()
+    b["embedding"] = torch.tensor([[0.5, -0.25], [1.0, 0.0]], dtype=torch.bfloat16)
+    return b
+
+
+def test_bfloat16():
+    """Blocker 1: bf16 has no numpy dtype; raw 16-bit LE path + finite check."""
+    check("bf16.golden", model_input_hash(bf16_batch()) == GOLDEN_BF16_MODEL_INPUT_HASH)
+    check("bf16.deterministic", model_input_hash(bf16_batch()) == model_input_hash(bf16_batch()))
+    # differs from the float32 embedding golden
+    check("bf16.differs_from_f32", GOLDEN_BF16_MODEL_INPUT_HASH != GOLDEN_MODEL_INPUT_HASH)
+    for bad in (float("inf"), float("nan"), float("-inf")):
+        b = bf16_batch(); b["embedding"] = b["embedding"].clone(); b["embedding"][0, 0] = bad
+        try:
+            model_input_hash(b); check("bf16.finite_%s" % bad, False)
+        except ValueError:
+            check("bf16.finite_%s" % bad, True)
+
+
+def test_identity_fail_closed():
+    """Blocker 2: identity precheck must reject malformed framing."""
+    good_utts = GOLDEN_IDENTITY_UTTS; good_rows = GOLDEN_IDENTITY_ROWIDS
+
+    def rejects(name, utts, rows):
+        try:
+            identity_precheck_hash(utts, rows); check(name, False)
+        except (ValueError, TypeError):
+            check(name, True)
+
+    rejects("id.count_mismatch", good_utts, good_rows[:1])
+    rejects("id.sha_uppercase", good_utts, [("AA" * 32, 0), ("bb" * 32, 5)])
+    rejects("id.sha_short", good_utts, [("aa" * 31, 0), ("bb" * 32, 5)])
+    rejects("id.sha_whitespace", good_utts, [("aa" * 31 + " a", 0), ("bb" * 32, 5)])
+    rejects("id.rowidx_float", good_utts, [("aa" * 32, 0.0), ("bb" * 32, 5)])
+    rejects("id.rowidx_bool", good_utts, [("aa" * 32, True), ("bb" * 32, 5)])
+    rejects("id.rowidx_str", good_utts, [("aa" * 32, "0"), ("bb" * 32, 5)])
+    rejects("id.rowidx_negative", good_utts, [("aa" * 32, -1), ("bb" * 32, 5)])
+    rejects("id.utt_nonstr", [123, "shardB__k1"], good_rows)
+
+
+def test_strict_types():
+    """Blocker 3: authoritative fields must be real tensors; utts strict str seq."""
+    def rejects(name, mutate):
+        b = golden_batch(); mutate(b)
+        try:
+            model_input_hash(b); check(name, False)
+        except (TypeError, ValueError):
+            check(name, True)
+
+    for field in ("text_token", "text_token_len", "speech_token",
+                  "speech_token_len", "embedding", "speech_feat_len"):
+        rejects("strict.%s_list" % field,
+                lambda b, f=field: b.__setitem__(f, b[f].tolist()))
+    rejects("strict.utts_bare_string", lambda b: b.__setitem__("utts", "shardA__k0"))
+    rejects("strict.utts_nonstr_elem", lambda b: b.__setitem__("utts", ["shardA__k0", 123]))
+
+
 def test_cross_process():
     """Recompute all golden hashes in a fresh interpreter; must be byte-identical
     (guards against PYTHONHASHSEED / process-salted nondeterminism)."""
@@ -197,6 +258,9 @@ def main():
     test_model_input_hash()
     test_model_input_negatives()
     test_dtype_mapping()
+    test_bfloat16()
+    test_identity_fail_closed()
+    test_strict_types()
     test_cross_process()
     n = len(_RESULTS); passed = sum(1 for _, ok in _RESULTS if ok)
     print("\n%d/%d passed" % (passed, n))
