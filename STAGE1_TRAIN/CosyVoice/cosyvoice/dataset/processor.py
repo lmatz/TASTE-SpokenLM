@@ -14,6 +14,7 @@
 import logging
 import random
 
+import soundfile as sf
 import torch
 import torchaudio
 import pyarrow as pa
@@ -22,7 +23,7 @@ import pyarrow.parquet as pq
 import torch.nn.functional as F
 
 # from cosyvoice.utils.audio_utils import ResamplerDict
-from datasets import Dataset
+from datasets import Audio, Dataset
 from io import BytesIO
 from torch.nn.utils.rnn import pad_sequence
 from funasr.utils.load_utils import extract_fbank
@@ -33,7 +34,7 @@ from transformers import WhisperTokenizerFast
 AUDIO_FORMAT_SETS = set(['flac', 'mp3', 'm4a', 'ogg', 'opus', 'wav', 'wma'])
 
 
-def parquet_opener(data, mode='train', tts_data={}):
+def parquet_opener(data, mode='train', tts_data={}, decode_audio=True):
     """ Give url or local file, return file descriptor
         Inplace operation.
 
@@ -63,11 +64,20 @@ def parquet_opener(data, mode='train', tts_data={}):
                 url = url.split(' ')[0]
                 # using hf would cause errors
                 ds = Dataset.from_file(url)
+                if not decode_audio:
+                    ds = ds.cast_column('mp3', Audio(decode=False))
                 for idx, _sample in enumerate(ds):
                     # if idx == 200: break
-                    _speech_pt = torch.tensor(_sample['mp3']['array'], dtype=torch.float32)
-                    if _speech_pt.dim() == 1:
-                        _speech_pt = _speech_pt.unsqueeze(0)
+                    if decode_audio:
+                        _speech_pt = torch.tensor(_sample['mp3']['array'], dtype=torch.float32)
+                        if _speech_pt.dim() == 1:
+                            _speech_pt = _speech_pt.unsqueeze(0)
+                        _audio_data = None
+                        _sample_rate = _sample['mp3']['sampling_rate']
+                    else:
+                        _speech_pt = None
+                        _audio_data = _sample['mp3']['bytes']
+                        _sample_rate = None
                     _key = url.split('.')[0].split('/')[-1] + "__" + _sample['__key__']
                     _new_sample = {
                         'src': url, 
@@ -77,11 +87,11 @@ def parquet_opener(data, mode='train', tts_data={}):
                         'utt_embedding': _sample['spk_emb'],
                         'spk_embedding': _sample['spk_emb'],
                         'speech_token': _sample['s3_token'],
-                        'audio_data': None,
+                        'audio_data': _audio_data,
                         # audio data here is different from the ones in the parquet file. Here they are directly to be in the hf audio form 
                         # _sample['mp3']: {'path': `path`, 'sampling_rate': 24000, 'array': np.array(1D, dtype=float64)}.
                         'speech': _speech_pt,
-                        'sample_rate': _sample['mp3']['sampling_rate']
+                        'sample_rate': _sample_rate
                     }
                     yield _new_sample
             else:
@@ -99,6 +109,114 @@ def parquet_opener(data, mode='train', tts_data={}):
                             yield {**sample, 'tts_index': index, 'tts_text': text}
         except Exception as ex:
             logging.warning('Failed to open {}, ex info {}'.format(url, ex))
+
+
+def text_only_audio_lengths(audio_data,
+                            target_sample_rate=22050,
+                            n_fft=1024,
+                            hop_size=256):
+    """Read encoded-audio metadata and derive exact baseline frame lengths."""
+    if not audio_data:
+        raise ValueError(
+            'text-only batching requires non-empty encoded audio bytes')
+    if target_sample_rate <= 0:
+        raise ValueError('target_sample_rate must be positive')
+    if n_fft <= 0 or hop_size <= 0 or n_fft <= hop_size:
+        raise ValueError('expected n_fft > hop_size > 0')
+
+    audio_info = sf.info(BytesIO(audio_data))
+    source_frames = int(audio_info.frames)
+    source_sample_rate = int(audio_info.samplerate)
+    if source_frames <= 0 or source_sample_rate <= 0:
+        raise ValueError(
+            f'invalid encoded audio metadata: frames={source_frames}, '
+            f'sample_rate={source_sample_rate}')
+
+    if source_sample_rate == target_sample_rate:
+        resampled_frames = source_frames
+    else:
+        resampled_frames = (
+            source_frames * target_sample_rate + source_sample_rate - 1
+        ) // source_sample_rate
+
+    pad = (n_fft - hop_size) // 2
+    if resampled_frames <= pad:
+        raise ValueError(
+            f'audio is too short for reflect padding: '
+            f'resampled_frames={resampled_frames}, pad={pad}')
+    padded_frames = resampled_frames + 2 * pad
+    feature_frames = 1 + (padded_frames - n_fft) // hop_size
+    if feature_frames <= 0:
+        raise ValueError(
+            f'invalid text-only feature length {feature_frames}')
+
+    return {
+        'source_frames': source_frames,
+        'source_sample_rate': source_sample_rate,
+        'resampled_frames': resampled_frames,
+        'feature_frames': feature_frames,
+    }
+
+
+def prepare_text_only_batching(data,
+                               target_sample_rate=22050,
+                               n_fft=1024,
+                               hop_size=256,
+                               min_sample_rate=16000,
+                               max_length=10240,
+                               min_length=10,
+                               token_max_length=200,
+                               token_min_length=1,
+                               min_output_input_ratio=0.0005,
+                               max_output_input_ratio=1,
+                               mode='train'):
+    """Prepare exact batching lengths without decoding text-only audio.
+
+    The text-only language model consumes text tokens, speech tokens, and
+    speaker embeddings. It does not consume ``speech_feat``. The original
+    pipeline still decodes every waveform, resamples it, and computes an
+    80-bin mel spectrogram solely so filtering and dynamic batching can use
+    its frame count.
+
+    SoundFile reads the encoded-audio header without decoding samples. The
+    resampled waveform length and STFT frame count are then computed with the
+    same integer formulas used by torchaudio and ``mel_spectrogram``. A
+    one-column placeholder preserves the existing processor contract while
+    avoiding waveform decode, resampling, STFT, and mel projection.
+    """
+    for sample in data:
+        audio_data = sample.get('audio_data')
+        audio_lengths = text_only_audio_lengths(
+            audio_data,
+            target_sample_rate=target_sample_rate,
+            n_fft=n_fft,
+            hop_size=hop_size)
+        source_frames = audio_lengths['source_frames']
+        source_sample_rate = audio_lengths['source_sample_rate']
+        if source_sample_rate < min_sample_rate:
+            continue
+
+        duration_frames = source_frames / source_sample_rate * 100
+        if duration_frames < min_length or duration_frames > max_length:
+            continue
+        if (len(sample['text_token']) < token_min_length or
+                len(sample['text_token']) > token_max_length):
+            continue
+        if len(sample['speech_token']) == 0:
+            continue
+        if duration_frames != 0:
+            token_ratio = len(sample['text_token']) / duration_frames
+            if (token_ratio < min_output_input_ratio or
+                    token_ratio > max_output_input_ratio):
+                continue
+
+        sample['speech_feat'] = torch.zeros(
+            (audio_lengths['feature_frames'], 1), dtype=torch.float32)
+        sample['sample_rate'] = target_sample_rate
+        sample['speech'] = None
+        sample['audio_data'] = None
+        yield sample
+
 
 def filter(data,
            max_length=10240,
@@ -627,4 +745,3 @@ def padding(data, use_spk_embedding, mode='train', has_audio_branch=False, use_a
         else:
             batch["embedding"] = batch["utt_embedding"]
         yield batch
-

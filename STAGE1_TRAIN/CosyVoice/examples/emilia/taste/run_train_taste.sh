@@ -29,7 +29,7 @@ if [ ${stage} -le 2 ] && [ ${stop_stage} -ge 2 ]; then
     job_id=1986
     dist_backend="nccl"
     data_loader_num_workers=2
-    prefetch=8
+    prefetch=32
     train_engine=torch_ddp
     model=llm
     echo "Conduct training of the text-only baseline."
