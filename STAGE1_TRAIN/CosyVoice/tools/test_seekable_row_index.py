@@ -102,6 +102,21 @@ def test_boundaries():
     check("bnd.ratio_0.0005_accept", C(441000, 22050, 1, 1)[0] is True)
 
 
+def test_fatal_precedes_ordinary():
+    """Contract §6 / production order: text_only_audio_lengths (fatal, raises)
+    runs BEFORE the 5 acceptance filters (prepare_text_only_batching:29 has no
+    try/except, so reflect-pad propagates = abort; the sr filter is at :36).
+    A row that is BOTH reflect-pad-fatal AND sr<16000 must ABORT (reflect-pad),
+    NOT reject-sr — otherwise seekable compile would abort on a row production
+    merely filters, or filter a row production aborts on."""
+    # sr=8000 (<16000) AND frames=100 -> resampled=276 <= 384 (reflect-pad)
+    try:
+        R.classify_row(100, 8000, 50, 10)
+        check("fatal_before_sr_filter", False)
+    except R.FatalRowError as e:
+        check("fatal_before_sr_filter", e.reason == R.FATAL_REFLECT_PAD_VIOLATION)
+
+
 def test_precedence():
     """Multi-rejection records the FIRST failing rule in order."""
     C = R.classify_row
@@ -119,6 +134,7 @@ def main():
     test_fatal()
     test_acceptance()
     test_boundaries()
+    test_fatal_precedes_ordinary()
     test_precedence()
     n = len(_RESULTS); passed = sum(1 for _, ok in _RESULTS if ok)
     print("\n%d/%d passed" % (passed, n))

@@ -107,8 +107,12 @@ def classify_row(source_frames: int, source_sample_rate: int,
 
     Returns (accepted: bool, reason: str|None). Fatal conditions raise
     FatalRowError. The FIRST failing rule (in precedence order) is recorded.
+
     ``speech_feat_len`` is computed first so its fatal conditions are checked
-    before ordinary filtering.
+    before ordinary filtering. This matches production order:
+    ``prepare_text_only_batching`` calls ``text_only_audio_lengths`` (which raises
+    on reflect-pad etc.) with NO try/except BEFORE the sample-rate filter, so a
+    reflect-pad-fatal row aborts rather than reaching the sr filter.
     """
     # Fatal header/length checks first (raise, not reject).
     _ = speech_feat_len(source_frames, source_sample_rate)
