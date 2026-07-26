@@ -1,7 +1,7 @@
 """Canonical JSON + digest helpers for the seekable-resume contract (task #34).
 
-Implements CONTRACT.md v1 section 3 (Canonical JSON). SHA256 of CONTRACT.md v1
-that this module targets: 5dda734324f7dbf051594385d42a1b48db8537b17c6d1d51586a14b996352511
+Implements CONTRACT.md v1.2 section 3 (Canonical JSON). SHA256 of CONTRACT.md v1.2
+that this module targets: bc54a7a6a09e7ab7b362699c6b16d35a56deb28c03ebac625653579041dfac43
 
 Rules (contract sect. 3):
 - json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True,

@@ -20,16 +20,18 @@ Per-tensor-field encoding (contract sect. 9, items 1-6):
   5. payload byte length (uint64 BE)
   6. CPU-contiguous C-order value bytes, explicitly little-endian
 
->>> IMPLEMENTER CHOICES flagged for Codex gate1 review (contract leaves the width
->>> of a few prefixes unspecified; these are pinned here and locked by golden
->>> vectors -- confirm or adjust before production):
->>>   (A) dtype-name length prefix width  = uint16 BE   [item 2]
->>>   (B) string-list element count width = uint64 BE   [utts / string lists]
->>>   (C) canonical dtype name = str(torch.dtype) with the leading "torch."
->>>       stripped, e.g. torch.int64 -> "int64", torch.bfloat16 -> "bfloat16".
->>>   (D) identity-precheck row-id encoding = source_shard_sha256 (32 raw bytes)
->>>       || zero_based_row_index (uint64 BE); precheck prefix
->>>       b"TASTE_STAGE1_IDENTITY_PRECHECK_V1\\x00".
+Encoding widths / framing (contract v1.2 sect. 9, SHA
+bc54a7a6a09e7ab7b362699c6b16d35a56deb28c03ebac625653579041dfac43):
+  (A) dtype-name length prefix width  = uint16 BE   [item 2, now normative]
+  (B) string-list element count width = uint64 BE   [utts / string lists]
+  (C) canonical dtype name = EXPLICIT FIXED MAPPING (contract v1.2, NOT str(dtype)):
+      bool/uint8/int8/int16/int32/int64/float16/bfloat16/float32/float64.
+      Any dtype outside this v1 mapping is forbidden -> abort. Framework aliases
+      such as ``torch.long`` canonicalize to the storage dtype name (``int64``)
+      because ``tensor.dtype`` already normalizes aliases to the storage dtype.
+  (D) identity-precheck row-id encoding = source_shard_sha256 (32 raw bytes)
+      || zero_based_row_index (uint64 BE); precheck prefix
+      b"TASTE_STAGE1_IDENTITY_PRECHECK_V1\\x00".
 """
 
 import struct
@@ -66,9 +68,16 @@ _DTYPE_NAME = {
 
 
 def _canonical_dtype_name(dtype: torch.dtype) -> str:
-    """Choice (C): canonical ASCII dtype name."""
+    """Choice (C): canonical ASCII dtype name from the explicit fixed mapping.
+
+    ``dtype`` is ``tensor.dtype``, which already normalizes framework aliases
+    (``torch.long`` -> ``torch.int64``) to the storage dtype, so the mapping keys
+    are the canonical storage dtypes. Any dtype outside the v1 mapping is
+    forbidden by contract v1.2 sect. 9 and aborts rather than guessing a name.
+    """
     if dtype not in _DTYPE_NAME:
-        raise ValueError("unsupported dtype for model-input hash: {}".format(dtype))
+        raise ValueError(
+            "dtype forbidden by seekable contract v1.2 model-input hash: {}".format(dtype))
     return _DTYPE_NAME[dtype]
 
 

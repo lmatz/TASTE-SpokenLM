@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gate-1 tests for seekable-resume deterministic primitives (task #34).
 
-Covers CONTRACT.md v1 sect. 3 (canonical JSON), sect. 4 (seed derivation), and
+Covers CONTRACT.md v1.2 sect. 3 (canonical JSON), sect. 4 (seed derivation), and
 sect. 9 (identity precheck + authoritative model-input hash). Includes:
   * fixed GOLDEN VECTORS that pin the byte-exact encodings,
   * cross-process reproducibility (recompute in a fresh interpreter),
@@ -144,6 +144,26 @@ def test_model_input_negatives():
     check("neg.speech_feat_len_guard", model_input_hash(b) != base)
 
 
+def test_dtype_mapping():
+    """Contract v1.2 sect. 9 (choice C): explicit fixed dtype mapping, alias
+    canonicalization to storage dtype, unlisted dtype aborts."""
+    from cosyvoice.utils.seekable.hashing import _canonical_dtype_name
+    # alias: torch.long IS torch.int64 -> "int64"; torch.float IS float32.
+    check("dtype.alias_long", _canonical_dtype_name(torch.long) == "int64")
+    check("dtype.alias_float", _canonical_dtype_name(torch.float) == "float32")
+    # alias batch equivalence: same values, torch.long vs torch.int64 -> same hash
+    b_long = golden_batch()
+    b_long["text_token"] = b_long["text_token"].to(torch.long)
+    b_long["speech_token"] = b_long["speech_token"].to(torch.long)
+    check("dtype.alias_batch_equiv", model_input_hash(b_long) == GOLDEN_MODEL_INPUT_HASH)
+    # unlisted dtype -> abort (not str(dtype) fallback)
+    b = golden_batch(); b["embedding"] = b["embedding"].to(torch.complex64)
+    try:
+        model_input_hash(b); check("dtype.unlisted_abort", False)
+    except ValueError:
+        check("dtype.unlisted_abort", True)
+
+
 def test_cross_process():
     """Recompute all golden hashes in a fresh interpreter; must be byte-identical
     (guards against PYTHONHASHSEED / process-salted nondeterminism)."""
@@ -176,6 +196,7 @@ def main():
     test_identity_hash()
     test_model_input_hash()
     test_model_input_negatives()
+    test_dtype_mapping()
     test_cross_process()
     n = len(_RESULTS); passed = sum(1 for _, ok in _RESULTS if ok)
     print("\n%d/%d passed" % (passed, n))
